@@ -1,0 +1,11 @@
+.venv/
+checkpoints/
+data/
+logs/
+model_colab.ipynb
+data_overview.ipynb
+eeg_inspect.ipynb
+sample_audio.ipynb
+README.md
+cache/
+*.pyc

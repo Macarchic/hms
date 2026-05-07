@@ -1,0 +1,34 @@
+Як користуватись                                                                                                                                                             
+                                                                                                                                                                               
+  Крок 1 — один раз: заповнити кеш                                                                                                                                             
+                                                                                                                                                                               
+  source .venv/bin/activate
+                                                                                                                                                                               
+  # спочатку перевір на 100 файлах (~10 сек)                                                                                                                                   
+  python src/precompute.py --limit 100                                                                                                                                         
+                                                                                                                                                                               
+  # потім повний (106 800 вікон, ~8.6 GB, ~30 хв)                                                                                                                              
+  python src/precompute.py
+                                                                                                                                                                               
+  Можна зупинити і продовжити — вже існуючі файли пропускаються.                                                                                                               
+   
+  ---                                                                                                                                                                          
+  Крок 2 — тренування
+                                                                                                                                                                               
+  # EEG модель (EfficientNet-B0 на STFT спектрограмах)
+  python src/train.py --modality eeg --epochs 30 --batch_size 16                                                                                                               
+                  
+  # Спектрограмна модель (EfficientNet-B0 на готових спектрограмах Kaggle)                                                                                                     
+  python src/train.py --modality spec --epochs 30 --batch_size 16
+                                                                                                                                                                               
+  # Санітарна перевірка (1 епоха, 8 семплів)                                                                                                                                   
+  python src/train.py --modality eeg --epochs 1 --batch_size 4 --train_size 8 --val_size 4
+                                                                                                                                                                               
+  Під час тренування бачиш:
+  Epoch 3/30  ━━━━━━━  train_loss: 0.412  val_loss: 0.387  val_acc: 0.61                                                                                                       
+  Чекпоінт зберігається автоматично в checkpoints/eeg_best.ckpt коли val_loss покращується. Якщо 7 епох без покращення — зупиняється сам.                                      
+                                                                                                                                                                               
+  ---                                                                                                                                                                          
+  Крок 3 — сабмішн                                                                                                                                                             
+                                                                                                                                                                               
+  python src/predict.py
