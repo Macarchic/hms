@@ -9,3 +9,5 @@ sample_audio.ipynb
 README.md
 cache/
 *.pyc
+*.yaml
+*.png

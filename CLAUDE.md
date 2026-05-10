@@ -1,82 +1,110 @@
-# CLAUDE.md
+# HMS – Harmful Brain Activity Classification
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Змагання
+Kaggle: [HMS - Harmful Brain Activity Classification](https://www.kaggle.com/competitions/hms-harmful-brain-activity-classification)
+Задача: 6-класова класифікація патерну активності мозку з ЕЕГ / спектрограм.
 
-## Project
+**6 класів (expert_consensus / vote columns):**
+| Клас | Повна назва |
+|------|-------------|
+| Seizure | Епілептичний напад |
+| LPD | Lateralized Periodic Discharges |
+| GPD | Generalized Periodic Discharges |
+| LRDA | Lateralized Rhythmic Delta Activity |
+| GRDA | Generalized Rhythmic Delta Activity |
+| Other | Інше |
 
-Kaggle [HMS — Harmful Brain Activity Classification](https://www.kaggle.com/competitions/hms-harmful-brain-activity-classification) competition solution. The task is multi-class soft-label classification of EEG brain activity into 6 categories: seizure, lpd, gpd, lrda, grda, other.
+**Метрика:** KL-divergence між передбаченим розподілом і усередненими голосами лікарів.
 
-## Commands
+---
 
-```bash
-# Train spectrogram model (EfficientNet-B0)
-python src/train.py --modality spec
-
-# Train EEG model (1D CNN)
-python src/train.py --modality eeg
-
-# Common flags
-python src/train.py --modality spec --epochs 30 --batch_size 32 --lr 1e-3 --num_workers 4
-
-# Quick sanity check (1 epoch, small batch)
-python src/train.py --modality spec --epochs 1 --batch_size 4
-
-# Run ensemble inference → generates submission.csv
-python src/predict.py
-```
-
-No requirements.txt or Makefile. Dependencies live in `.venv/`; activate with `source .venv/bin/activate`. Key packages: PyTorch, timm (EfficientNet), pandas, pyarrow, kagglehub.
-
-## Architecture
-
-Dual-modality ensemble: two independent models trained separately, predictions averaged at inference time.
-
-### Data pipeline (`src/dataset.py`)
-
-| Constant | Value |
-|---|---|
-| `VOTE_COLS` | 6 label columns (seizure_vote … other_vote) |
-| `SPEC_GROUPS` | 4 EEG chain groups: LL, RL, LP, RP |
-| `EEG_CHANNELS` | 20 standard scalp electrodes + EKG |
-| `EEG_FS` | 200 Hz |
-| `EEG_WINDOW_SEC` | 10 s → 2000 samples |
-
-**HMSSpectrogramDataset**: reads `train_spectrograms/{id}.parquet` → tensor `(4, 100, 300)`. Training augmentations: horizontal flip (p=0.5), frequency masking (p=0.5).
-
-**HMSEEGDataset**: reads `train_eegs/{id}.parquet`, extracts 10-s window at `eeg_label_offset_seconds` → tensor `(20, 2000)`. Training augmentations: Gaussian noise (σ=0.01), per-channel random sign flip.
-
-Both datasets normalise vote columns to a probability distribution used as soft targets.
-
-### Models
-
-**SpectrogramModel** (`src/spec_model.py`): EfficientNet-B0 (`timm`, pretrained) with `in_chans=4`, global avg pool, Dropout(0.2) → Linear(1280→6).
-
-**EEGModel** (`src/eeg_model.py`): 5-block 1D CNN, filter progression 64→128→256→256→512, kernels [7,7,5,5,3], stride 2 each. Adaptive avg pool → Dropout(0.2) → Linear(512→6).
-
-### Training (`src/train.py`)
-
-- Loss: KL-divergence (`F.kl_div(log_softmax(logits), soft_targets)`)
-- Optimiser: AdamW
-- Scheduler: cosine annealing
-- Split: `GroupShuffleSplit` on `patient_id` (80/20), preventing leakage
-- Device priority: MPS → CUDA → CPU
-- Checkpoints: `checkpoints/{spec_best,eeg_best}.pt` (best val loss)
-
-### Inference (`src/predict.py`)
-
-Loads both checkpoints (skips missing ones), averages softmax outputs, writes `submission.csv` in Kaggle format.
-
-## Data layout
+## Структура даних
 
 ```
 data/
-  train.csv                  # 106,800 labelled segments
-  test.csv                   # 1 test segment
+  train.csv               # 106 800 анотацій-вікон
+  test.csv
   sample_submission.csv
-  train_eegs/                # 17,300 parquet files
-  train_spectrograms/        # 11,138 parquet files
-  test_eegs/                 # 1 parquet file
-  test_spectrograms/         # 1 parquet file
+  train_eegs/             # 17 300 parquet-файлів (сирий ЕЕГ)
+  train_spectrograms/     # 11 138 parquet-файлів (спектрограми Kaggle)
+  test_eegs/
+  test_spectrograms/
 ```
 
-`train.csv` key columns: `eeg_id`, `spectrogram_id`, `patient_id`, `eeg_label_offset_seconds`, `spectrogram_label_offset_seconds`, plus the 6 vote columns. Deduplication in `train.py` keeps one row per `(spectrogram_id, spectrogram_sub_id)` or `(eeg_id, eeg_sub_id)` depending on modality.
+### train.csv — ключові поля
+| Поле | Опис |
+|------|------|
+| eeg_id | ID сирого ЕЕГ-файлу |
+| eeg_sub_id | Порядковий номер вікна в межах цього файлу |
+| eeg_label_offset_seconds | Початок 50-сек вікна всередині ЕЕГ-файлу |
+| spectrogram_id | ID спектрограми |
+| spectrogram_label_offset_seconds | Початок 10-хв вікна всередині спектрограми |
+| patient_id | Пацієнт |
+| expert_consensus | Мажоритарна мітка |
+| seizure_vote … other_vote | Голоси 6 лікарів (сума ≤ 6 на рядок) |
+
+### ЕЕГ parquet (train_eegs/*.parquet)
+- **20 стовпців:** 19 каналів (10–20 система: Fp1 F3 C3 P3 F7 T3 T5 O1 Fz Cz Pz Fp2 F4 C4 P4 F8 T4 T6 O2) + EKG
+- **Частота дискретизації:** 200 Гц → 1 рядок = 5 мс
+- **Мінімальна довжина запису:** 10 000 рядків = 50 сек (файли бувають довшими)
+- **Одиниці:** мікровольти (µV), float32
+- **Анотоване вікно:** 50 сек (10 000 рядків), що береться з offset = `eeg_label_offset_seconds`
+
+### Спектрограма parquet (train_spectrograms/*.parquet)
+- **401 стовпець:** `time` (секунди) + 400 частотних бінів (4 ланцюги × 100 бінів)
+- **4 ланцюги (bipolar montage):** LL (Left Lateral), RL (Right Lateral), LP (Left Parasagittal), RP (Right Parasagittal)
+- **Частотний діапазон:** 0.59 – 19.92 Гц, крок ~0.20 Гц (100 бінів)
+- **Часовий крок:** 2 сек → 1 рядок = 2 сек
+- **Мінімальна довжина:** 300 рядків = 600 сек = 10 хв (файли бувають довшими)
+- **Анотоване вікно:** 10 хв, offset = `spectrogram_label_offset_seconds`
+- **Одиниці:** потужність (µV²/Гц), float32
+
+### Зв'язок ЕЕГ ↔ Спектрограма
+Спектрограма **похідна** від ЕЕГ: Kaggle попередньо порахував Short-Time Fourier Transform (STFT) по 4 bipolar-ланцюгах і зберіг потужності. Один 2-секундний рядок спектрограми = FFT одного 2-секундного вікна ЕЕГ (400 рядків при 200 Гц).
+
+---
+
+## Поточний пайплайн (src/)
+
+| Файл | Призначення |
+|------|-------------|
+| `src/utils.py` | Шляхи (DATA_DIR, CACHE_DIR, …), `get_device()` |
+| `src/logger.py` | Централізований логер (імпортувати звідси, не inline) |
+| `src/eeg_model.py` | Архітектура моделі для ЕЕГ |
+| `src/callbacks.py` | Callbacks для тренування |
+
+### Кроки запуску
+```bash
+source .venv/bin/activate
+
+# 1. Передобчислення кешу (STFT → parquet)
+python src/precompute.py --limit 100   # тест на 100
+python src/precompute.py               # повний (~8.6 GB, ~30 хв)
+
+# 2. Тренування
+python src/train.py --modality eeg  --epochs 30 --batch_size 16
+python src/train.py --modality spec --epochs 30 --batch_size 16
+
+# Санітарна перевірка
+python src/train.py --modality eeg --epochs 1 --batch_size 4 --train_size 8 --val_size 4
+
+# 3. Predict / submission
+python src/predict.py
+```
+Чекпоінти: `checkpoints/eeg_best.ckpt`, `checkpoints/spec_best.ckpt`
+Early stopping: 7 епох без покращення val_loss.
+
+---
+
+## Правила кодування
+- Логер: завжди `from src.logger import get_logger`, не inline logging
+- CLI params (--batch_size, --train_size, etc.): тільки `int`, не float/fraction
+- Форматування: без вирівнювальних пробілів (Flake8 E221)
+- Без зайвих коментарів (лише non-obvious WHY)
+
+---
+
+## Середовище
+- Python venv: `.venv/`
+- Пристрій: MPS (Apple Silicon) → CUDA → CPU (auto in `get_device()`)
+- Залежності: `requirements.txt` (torch 2.11, timm 1.0, pandas 3.0, pyarrow 24)
