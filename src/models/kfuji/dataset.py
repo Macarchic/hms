@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+from src.models.kfuji.augment import xy_masking
 from src.models.kfuji.config import KfujiConfig
 from src.models.kfuji.cwt import build_freqs, make_psi_matrix, paul_scalogram
 
@@ -107,7 +108,10 @@ class HMSDataset(Dataset):
             align_corners=False,
         ).squeeze(0)  # (1, H, W)
 
-        return image.expand(3, -1, -1).contiguous()  # (3, H, W)
+        image = image.expand(3, -1, -1).contiguous()  # (3, H, W)
+        if self.training:
+            image = xy_masking(image.clone())
+        return image
 
     def _make_label(self, row: dict) -> torch.Tensor:
         votes = np.array([row[col] for col in VOTE_COLS], dtype=np.float32)

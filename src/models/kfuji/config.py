@@ -5,7 +5,7 @@ from dataclasses import dataclass
 class KfujiConfig:
     # CWT (Paul wavelet)
     lower_freq: float = 0.5
-    upper_freq: float = 20.0
+    upper_freq: float = 40.0
     n_scales: int = 40
     cwt_stride: int = 16
     cwt_border_crop: int = 1
@@ -17,7 +17,7 @@ class KfujiConfig:
     label_smoothing: float = 0.02
 
     # Model
-    backbone: str = "convnext_small.fb_in1k"  # "maxvit_base_tf_512.in21k_ft_in1k"
+    backbone: str = "maxvit_base_tf_512.in21k_ft_in1k"
     num_classes: int = 6
     pretrained: bool = True
 

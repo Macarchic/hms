@@ -72,10 +72,10 @@ def make_loaders(ds_cls, cfg, train_df, val_df, eeg_dir, num_workers):
     return train_dl, val_dl
 
 
-def build_trainer(cfg, log_dir, ckpt_dir, max_epochs, patience=7):
+def build_trainer(cfg, log_dir, ckpt_dir, max_epochs, patience=7, stage_suffix=""):
     ckpt_cb = ModelCheckpoint(
         dirpath=ckpt_dir,
-        filename="{epoch:02d}-{val_loss:.4f}",
+        filename="{epoch:02d}-{val_loss:.4f}" + stage_suffix,
         monitor="val_loss",
         mode="min",
         save_top_k=1,
@@ -83,8 +83,8 @@ def build_trainer(cfg, log_dir, ckpt_dir, max_epochs, patience=7):
     callbacks = [
         ckpt_cb,
         EarlyStopping(monitor="val_loss", patience=patience, mode="min"),
-        EpochMetricsLogger(log_path=os.path.join(log_dir, "metrics.csv")),
-        PredictionLogger(log_path=os.path.join(log_dir, "preds.csv")),
+        EpochMetricsLogger(log_path=os.path.join(log_dir, f"metrics{stage_suffix}.csv")),
+        PredictionLogger(log_path=os.path.join(log_dir, f"preds{stage_suffix}.csv")),
     ]
     trainer = L.Trainer(
         max_epochs=max_epochs,
@@ -134,7 +134,7 @@ def main():
 
         train_dl, val_dl = make_loaders(ds_cls, cfg, stage1_df, val_df, eeg_dir, args.num_workers)
         model = mod_cls(cfg)
-        trainer, ckpt_cb = build_trainer(cfg, log_dir, ckpt_dir, max_epochs=args.stage1_epochs)
+        trainer, ckpt_cb = build_trainer(cfg, log_dir, ckpt_dir, max_epochs=args.stage1_epochs, stage_suffix="_s1")
         trainer.fit(model, train_dl, val_dl)
 
         # --- Stage 2: quality data, lower LR ---
@@ -147,7 +147,7 @@ def main():
 
         train_dl, val_dl = make_loaders(ds_cls, cfg, stage2_df, val_df, eeg_dir, args.num_workers)
         model = mod_cls.load_from_checkpoint(ckpt_cb.best_model_path, config=cfg)
-        trainer2, _ = build_trainer(cfg, log_dir, ckpt_dir, max_epochs=stage2_epochs)
+        trainer2, _ = build_trainer(cfg, log_dir, ckpt_dir, max_epochs=stage2_epochs, stage_suffix="_s2")
         trainer2.fit(model, train_dl, val_dl)
     else:
         train_df = train_all[train_all["total_votes"] > 1]

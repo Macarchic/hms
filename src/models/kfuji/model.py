@@ -5,8 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from src.models.kfuji.config import KfujiConfig
 from adan_pytorch import Adan
+
+from src.models.kfuji.augment import mixup_batch
+from src.models.kfuji.config import KfujiConfig
 
 
 class KfujiModule(L.LightningModule):
@@ -38,7 +40,9 @@ class KfujiModule(L.LightningModule):
         return loss, acc
 
     def training_step(self, batch, batch_idx):
-        loss, acc = self._step(batch)
+        x, y = batch
+        x, y = mixup_batch(x, y)
+        loss, acc = self._step((x, y))
         self.log("train_loss", loss, on_epoch=True, on_step=False, prog_bar=True)
         self.log("train_acc", acc, on_epoch=True, on_step=False, prog_bar=True)
         return loss
