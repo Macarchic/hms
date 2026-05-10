@@ -25,7 +25,9 @@ class EpochMetricsLogger(L.Callback):
             return
 
         m = trainer.callback_metrics
-        lr = trainer.optimizers[0].param_groups[0]['lr']
+        param_groups = trainer.optimizers[0].param_groups
+        lr_head = param_groups[-1]['lr']
+        lr_bb   = param_groups[0]['lr'] if len(param_groups) > 1 else lr_head
 
         val_loss = m.get('val_loss')
         if val_loss is not None and val_loss.item() < self.best_val_loss:
@@ -38,12 +40,14 @@ class EpochMetricsLogger(L.Callback):
             'train_acc':  round(m['train_acc'].item(), 4)  if 'train_acc'  in m else '',
             'val_loss':   round(m['val_loss'].item(), 6)   if 'val_loss'   in m else '',
             'val_acc':    round(m['val_acc'].item(), 4)    if 'val_acc'    in m else '',
-            'lr':         f'{lr:.8f}',
+            'lr':         f'{lr_head:.8f}',
+            'lr_bb':      f'{lr_bb:.8f}',
         }
 
         write_header = not os.path.exists(self.log_path)
         with open(self.log_path, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            fieldnames = ['epoch', 'train_loss', 'train_acc', 'val_loss', 'val_acc', 'lr', 'lr_bb']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             if write_header:
                 writer.writeheader()
             writer.writerow(row)

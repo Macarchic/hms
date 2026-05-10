@@ -21,6 +21,24 @@ from eeg_model import EEGModel
 from train import HMSModule
 from utils import get_device, DATA_DIR, CKPT_DIR
 
+
+def _latest_ckpt(modality: str) -> str | None:
+    """Finds best.ckpt in the most recent versioned run folder for a modality."""
+    prefix = f'{modality}_v'
+    runs = []
+    if os.path.isdir(CKPT_DIR):
+        for d in os.listdir(CKPT_DIR):
+            if d.startswith(prefix) and os.path.isdir(os.path.join(CKPT_DIR, d)):
+                tail = d[len(prefix):]
+                n_str = tail.split('_')[0]
+                if n_str.isdigit():
+                    runs.append((int(n_str), d))
+    if not runs:
+        return None
+    _, latest = max(runs)
+    path = os.path.join(CKPT_DIR, latest, 'best.ckpt')
+    return path if os.path.exists(path) else None
+
 LABEL_COLS = ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']
 
 
@@ -55,9 +73,10 @@ def main():
         test_df['spectrogram_label_offset_seconds'] = 0.0
 
     # ── spectrogram predictions ──────────────────────────────────────────────
-    spec_ckpt = os.path.join(CKPT_DIR, 'spec_best.ckpt')
+    spec_ckpt  = _latest_ckpt('spec')
     spec_probs = None
-    if os.path.exists(spec_ckpt):
+    if spec_ckpt:
+        print(f'spec checkpoint : {spec_ckpt}')
         lit = load_model(HMSModule, SpectrogramModel(pretrained=False), spec_ckpt, device)
         ds  = HMSSpectrogramDataset(test_df, os.path.join(DATA_DIR, 'test_spectrograms'), augment=False)
         spec_probs = predict_probs(lit, DataLoader(ds, batch_size=8, shuffle=False), device)
@@ -66,13 +85,14 @@ def main():
         print('spec checkpoint not found, skipping')
 
     # ── eeg predictions ──────────────────────────────────────────────────────
-    eeg_ckpt = os.path.join(CKPT_DIR, 'eeg_best.ckpt')
+    eeg_ckpt  = _latest_ckpt('eeg')
     eeg_probs = None
-    if os.path.exists(eeg_ckpt):
+    if eeg_ckpt:
+        print(f'eeg checkpoint  : {eeg_ckpt}')
         lit = load_model(HMSModule, EEGModel(), eeg_ckpt, device)
         ds  = HMSEEGDataset(test_df, os.path.join(DATA_DIR, 'test_eegs'), augment=False)
         eeg_probs = predict_probs(lit, DataLoader(ds, batch_size=8, shuffle=False), device)
-        print(f'eeg predictions: {eeg_probs.shape}')
+        print(f'eeg predictions : {eeg_probs.shape}')
     else:
         print('eeg checkpoint not found, skipping')
 

@@ -11,17 +11,18 @@ class SpectrogramModel(nn.Module):
     Output: (B, 6) logits
     """
 
-    def __init__(self, num_classes: int = 6, pretrained: bool = True, drop_rate: float = 0.2):
+    def __init__(self, num_classes: int = 6, pretrained: bool = True, drop_rate: float = 0.2,
+                 backbone: str = 'efficientnet_b0'):
         super().__init__()
 
         self.backbone = timm.create_model(
-            'efficientnet_b0',
+            backbone,
             pretrained=pretrained,
-            in_chans=4,        # 4 EEG chain groups instead of 3 RGB
-            num_classes=0,     # remove default classifier
+            in_chans=4,
+            num_classes=0,
             global_pool='avg',
         )
-        n_features = self.backbone.num_features  # 1280 for B0
+        n_features = self.backbone.num_features
 
         self.head = nn.Sequential(
             nn.Dropout(drop_rate),

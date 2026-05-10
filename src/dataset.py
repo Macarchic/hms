@@ -26,18 +26,18 @@ _LP = ['Fp1', 'F3', 'C3', 'P3', 'O1']
 _RP = ['Fp2', 'F4', 'C4', 'P4', 'O2']
 _CHAINS = [_LL, _RL, _LP, _RP]
 
-# Butterworth bandpass 0.5–20 Hz, precomputed once
-_BUTTER_SOS = butter(N=5, Wn=[0.5, 20.0], btype='bandpass', fs=EEG_FS, output='sos')
+# Butterworth bandpass 0.5–40 Hz (includes beta band 13–30 Hz)
+_BUTTER_SOS = butter(N=5, Wn=[0.5, 40.0], btype='bandpass', fs=EEG_FS, output='sos')
 
 # STFT parameters
 EEG_N_FFT = 128    # window = 128/200 = 640 ms
-EEG_HOP = 50       # step   =  50/200 = 250 ms
+EEG_HOP = 25       # step   =  25/200 = 125 ms (doubled time resolution)
 
-# Frequency axis of STFT and mask for 0–20 Hz
+# Frequency axis of STFT and mask for 0–40 Hz
 _STFT_FREQS = np.fft.rfftfreq(EEG_N_FFT, d=1.0 / EEG_FS)   # (65,)
-_FREQ_MASK = _STFT_FREQS <= 20.0                              # keep clinical range
-EEG_FREQ_BINS = int(_FREQ_MASK.sum())                         # 13 bins: 0–18.75 Hz
-EEG_TIME_STEPS = (EEG_WINDOW_SAMPLES - EEG_N_FFT) // EEG_HOP + 1  # 198 steps
+_FREQ_MASK = _STFT_FREQS <= 40.0                              # delta/theta/alpha/beta
+EEG_FREQ_BINS = int(_FREQ_MASK.sum())                         # 26 bins: 0–39 Hz
+EEG_TIME_STEPS = (EEG_WINDOW_SAMPLES - EEG_N_FFT) // EEG_HOP + 1  # 395 steps
 
 
 def _soft_label(row: pd.Series) -> np.ndarray:
@@ -71,16 +71,22 @@ class HMSSpectrogramDataset(Dataset):
         arrays = []
         for g in SPEC_GROUPS:
             cols = [c for c in raw.columns if c.startswith(f'{g}_')]
-            arr = raw[cols].values.T.astype(np.float32)  # (100, 300)
+            arr = raw[cols].values.T.astype(np.float32)  # (100, T)
             arrays.append(arr)
         spec = np.stack(arrays, axis=0)  # (4, 100, T)
 
+        # each time step = 2 sec; extract SPEC_TIMES steps starting at label offset
+        offset_sec = float(row.get('spectrogram_label_offset_seconds', 0))
+        start = int(offset_sec / 2)
         t = spec.shape[2]
-        if t >= SPEC_TIMES:
-            spec = spec[:, :, :SPEC_TIMES]
+        start = min(start, max(0, t - SPEC_TIMES))
+        end = start + SPEC_TIMES
+        if end <= t:
+            spec = spec[:, :, start:end]
         else:
-            pad = np.zeros((spec.shape[0], spec.shape[1], SPEC_TIMES - t), dtype=np.float32)
-            spec = np.concatenate([spec, pad], axis=2)
+            chunk = spec[:, :, start:t]
+            pad = np.zeros((spec.shape[0], spec.shape[1], SPEC_TIMES - chunk.shape[2]), dtype=np.float32)
+            spec = np.concatenate([chunk, pad], axis=2)
 
         np.nan_to_num(spec, copy=False)
 
@@ -95,7 +101,7 @@ class HMSEEGDataset(Dataset):
     """
     Returns:
         spec  : float32 tensor (16, EEG_FREQ_BINS, EEG_TIME_STEPS)
-                16 bipolar leads × 13 freq bins (0–20 Hz) × 198 time steps
+                16 bipolar leads × 26 freq bins (0–40 Hz) × 395 time steps
         label : float32 tensor (6,)
 
     cache_dir: якщо вказано і файл {eeg_id}_{eeg_sub_id}.npy існує —
@@ -122,24 +128,29 @@ class HMSEEGDataset(Dataset):
         if self.cache_dir is not None:
             cache_file = os.path.join(self.cache_dir, f'{eeg_id}_{sub_id}.npy')
             if os.path.exists(cache_file):
-                spec = np.load(cache_file).astype(np.float32)  # (16, 13, 198)
-                if self.augment:
-                    spec = _augment_eeg(spec)
-                return torch.from_numpy(spec), torch.from_numpy(_soft_label(row))
+                spec = np.load(cache_file).astype(np.float32)
+                if spec.shape == (16, EEG_FREQ_BINS, EEG_TIME_STEPS):
+                    if self.augment:
+                        spec = _augment_eeg(spec)
+                    return torch.from_numpy(spec), torch.from_numpy(_soft_label(row))
+                # shape mismatch → stale cache, fall through to recompute
 
         # ── повний pipeline якщо кешу немає ─────────────────────────────────
         raw = pd.read_parquet(f'{self.eeg_dir}/{eeg_id}.parquet')
         data = raw[EEG_ALL_COLS].values.astype(np.float32)  # (N, 20)
         col_idx = {c: i for i, c in enumerate(EEG_ALL_COLS)}
 
-        # ── 50-second window with clamping ───────────────────────────────────
+        # ── 50-second window centered on the labeled 10s segment ─────────────
         offset_sec = float(row.get('eeg_label_offset_seconds', 0))
-        start = int(offset_sec * EEG_FS)
-        end = start + EEG_WINDOW_SAMPLES
         file_len = len(data)
-        if end > file_len:
+        center = int((offset_sec + 5.0) * EEG_FS)
+        start = center - EEG_WINDOW_SAMPLES // 2
+        end = start + EEG_WINDOW_SAMPLES
+        if start < 0:
+            start, end = 0, EEG_WINDOW_SAMPLES
+        elif end > file_len:
+            start = max(0, file_len - EEG_WINDOW_SAMPLES)
             end = file_len
-            start = max(0, end - EEG_WINDOW_SAMPLES)
         segment = data[start:end]
 
         if len(segment) < EEG_WINDOW_SAMPLES:
@@ -173,9 +184,9 @@ class HMSEEGDataset(Dataset):
             _, _, Zxx = scipy_stft(eeg[ch], fs=EEG_FS, nperseg=EEG_N_FFT,
                                    noverlap=EEG_N_FFT - EEG_HOP,
                                    boundary=None, padded=False)
-            mag = np.abs(Zxx)[_FREQ_MASK, :EEG_TIME_STEPS]  # (13, 198)
+            mag = np.abs(Zxx)[_FREQ_MASK, :EEG_TIME_STEPS]  # (26, 395)
             specs.append(mag)
-        spec = np.stack(specs, axis=0).astype(np.float32)   # (16, 13, 198)
+        spec = np.stack(specs, axis=0).astype(np.float32)   # (16, 26, 395)
         spec = np.log1p(spec)
 
         if self.augment:
@@ -198,14 +209,18 @@ def _augment_spec(spec: np.ndarray) -> np.ndarray:
 
 def _augment_eeg(spec: np.ndarray) -> np.ndarray:
     # spec: (16, F, T)
-    # time mask
+    # time mask — up to 20% of window
     if np.random.rand() < 0.5:
         t0 = np.random.randint(0, spec.shape[2])
-        t_w = np.random.randint(1, max(2, spec.shape[2] // 10))
+        t_w = np.random.randint(1, max(2, spec.shape[2] // 5))
         spec[:, :, t0:t0 + t_w] = 0.0
     # freq mask
     if np.random.rand() < 0.5:
         f0 = np.random.randint(0, spec.shape[1])
         f_w = np.random.randint(1, max(2, spec.shape[1] // 3))
         spec[:, f0:f0 + f_w, :] = 0.0
+    # channel dropout — zero out one random lead
+    if np.random.rand() < 0.3:
+        ch = np.random.randint(0, spec.shape[0])
+        spec[ch] = 0.0
     return spec
