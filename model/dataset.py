@@ -195,8 +195,9 @@ class EEGDataset(Dataset):
             img_t = _xy_masking(img_t)
 
         label = row[VOTE_COLS].values.astype(np.float32)
-        label += LABEL_SMOOTHING
-        label /= label.sum()
+        if self.augment:
+            label += LABEL_SMOOTHING
+            label /= label.sum()
         return img_t, torch.from_numpy(label)
 
     @staticmethod

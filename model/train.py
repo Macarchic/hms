@@ -28,9 +28,9 @@ def next_version() -> int:
 
 
 class EEGModel(nn.Module):
-    def __init__(self, backbone: str, dropout: float):
+    def __init__(self, backbone: str, dropout: float, pretrained: bool = True):
         super().__init__()
-        self.backbone = timm.create_model(backbone, pretrained=True, num_classes=0)
+        self.backbone = timm.create_model(backbone, pretrained=pretrained, num_classes=0)
         self.drop = nn.Dropout(dropout)
         self.fc = nn.Linear(self.backbone.num_features, 6)
 
@@ -40,8 +40,8 @@ class EEGModel(nn.Module):
         return F.log_softmax(self.fc(x), dim=1)  # (B, 6) log-probs
 
 
-def build_model(backbone: str, dropout: float = 0.5) -> nn.Module:
-    return EEGModel(backbone, dropout)
+def build_model(backbone: str, dropout: float = 0.5, pretrained: bool = True) -> nn.Module:
+    return EEGModel(backbone, dropout, pretrained)
 
 
 def kldiv_loss(log_probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
