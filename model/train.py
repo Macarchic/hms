@@ -48,10 +48,15 @@ def kldiv_loss(log_probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return F.kl_div(log_probs, targets, reduction='batchmean')
 
 
-def run_epoch(model, loader, optimizer, device, train: bool,
-              desc: str = '') -> float:
+def run_epoch(model, loader, optimizer, device, train: bool, desc: str = ''):
+    """
+    Returns (loss, all_probs, all_targets) for train=False,
+            (loss, None,      None       ) for train=True.
+    Preds collected from the same batches that compute val loss → guaranteed consistent.
+    """
     model.train(train)
     total_loss, n = 0.0, 0
+    all_probs, all_targets = [], []
     ctx = torch.enable_grad() if train else torch.no_grad()
     bar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True)
     with ctx:
@@ -63,10 +68,15 @@ def run_epoch(model, loader, optimizer, device, train: bool,
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+            else:
+                all_probs.append(log_probs.exp().cpu())
+                all_targets.append(labels.cpu())
             total_loss += loss.item() * len(imgs)
             n += len(imgs)
             bar.set_postfix(loss=f'{total_loss / n:.4f}')
-    return total_loss / n
+    if train:
+        return total_loss / n, None, None
+    return total_loss / n, torch.cat(all_probs), torch.cat(all_targets)
 
 
 def make_weighted_sampler(train_df: pd.DataFrame) -> WeightedRandomSampler:
@@ -75,24 +85,21 @@ def make_weighted_sampler(train_df: pd.DataFrame) -> WeightedRandomSampler:
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
-def predict_val(model, val_df: pd.DataFrame, eeg_dir: Path,
-                batch_size: int, device, fold: int, epoch: int) -> pd.DataFrame:
-    ds = EEGDataset(val_df, eeg_dir, augment=False)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    model.eval()
-    all_probs = []
-    with torch.no_grad():
-        for imgs, _ in loader:
-            all_probs.append(model(imgs.to(device)).exp().cpu().numpy())
-    probs = np.vstack(all_probs)
+def summarise_preds(preds: torch.Tensor, targets: torch.Tensor,
+                    fold: int, epoch: int) -> dict:
+    pred_mean = preds.mean(dim=0)
+    true_mean = targets.mean(dim=0)
+    pred_cls = preds.argmax(dim=1)
+    true_cls = targets.argmax(dim=1)
 
-    result = val_df[['eeg_id'] + VOTE_COLS].copy().reset_index(drop=True)
-    result.columns = ['eeg_id'] + [f'true_{c}' for c in CLASS_NAMES]
+    row = {'fold': fold, 'epoch': epoch}
     for i, c in enumerate(CLASS_NAMES):
-        result[f'pred_{c}'] = probs[:, i]
-    result.insert(0, 'epoch', epoch)
-    result.insert(0, 'fold', fold)
-    return result
+        mask = true_cls == i
+        acc = (pred_cls[mask] == i).float().mean().item() if mask.sum() > 0 else float('nan')
+        row[f'pred_{c}'] = round(pred_mean[i].item(), 4)
+        row[f'true_{c}'] = round(true_mean[i].item(), 4)
+        row[f'acc_{c}'] = round(acc, 4) if acc == acc else ''
+    return row
 
 
 def train_fold(args, df: pd.DataFrame, fold: int, device,
@@ -122,29 +129,38 @@ def train_fold(args, df: pd.DataFrame, fold: int, device,
     patience_count = 0
 
     metrics_path = log_dir / 'metrics.csv'
-    write_header = not metrics_path.exists()
+    preds_path = log_dir / 'preds.csv'
     metrics_file = metrics_path.open('a', newline='')
-    writer = csv.DictWriter(metrics_file, fieldnames=['fold', 'epoch', 'train_loss', 'val_loss'])
-    if write_header:
-        writer.writeheader()
+    metrics_writer = csv.DictWriter(
+        metrics_file, fieldnames=['fold', 'epoch', 'train_loss', 'val_loss'])
+    if not metrics_path.exists() or metrics_path.stat().st_size == 0:
+        metrics_writer.writeheader()
+
+    preds_fields = ['fold', 'epoch']
+    for c in CLASS_NAMES:
+        preds_fields += [f'pred_{c}', f'true_{c}', f'acc_{c}']
+    preds_file = preds_path.open('a', newline='')
+    preds_writer = csv.DictWriter(preds_file, fieldnames=preds_fields)
+    if not preds_path.exists() or preds_path.stat().st_size == 0:
+        preds_writer.writeheader()
 
     log.info(f'fold {fold} | train={len(train_df)} val={len(val_df)}')
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(model, train_loader, optimizer, device, train=True,
-                               desc=f'f{fold} e{epoch:03d} train')
-        val_loss = run_epoch(model, val_loader, optimizer, device, train=False,
-                             desc=f'f{fold} e{epoch:03d} val  ')
+        train_loss, _, _ = run_epoch(model, train_loader, optimizer, device, train=True,
+                                     desc=f'f{fold} e{epoch:03d} train')
+        val_loss, preds, targets = run_epoch(model, val_loader, optimizer, device, train=False,
+                                             desc=f'f{fold} e{epoch:03d} val  ')
         scheduler.step()
 
-        writer.writerow({'fold': fold, 'epoch': epoch,
-                         'train_loss': round(train_loss, 6),
-                         'val_loss': round(val_loss, 6)})
+        metrics_writer.writerow({'fold': fold, 'epoch': epoch,
+                                 'train_loss': round(train_loss, 6),
+                                 'val_loss': round(val_loss, 6)})
         metrics_file.flush()
 
-        preds_df = predict_val(model, val_df, eeg_dir, args.batch_size, device, fold, epoch)
-        preds_path = log_dir / 'preds.csv'
-        preds_df.to_csv(preds_path, mode='a', header=not preds_path.exists(), index=False)
+        preds_row = summarise_preds(preds, targets, fold, epoch)
+        preds_writer.writerow(preds_row)
+        preds_file.flush()
 
         improved = val_loss < best_val
         if improved:
@@ -158,17 +174,20 @@ def train_fold(args, df: pd.DataFrame, fold: int, device,
         else:
             patience_count += 1
 
+        pred_str = '  '.join(f'{c}={preds_row[f"pred_{c}"]:.3f}' for c in CLASS_NAMES)
         log.info(
             f'fold {fold} | epoch {epoch:03d}/{args.epochs} '
             f'train={train_loss:.4f} val={val_loss:.4f} '
             f'best={best_val:.4f} {"★" if improved else ""}'
         )
+        log.info(f'         pred:  {pred_str}')
 
         if patience_count >= args.patience:
             log.info(f'fold {fold} | early stopping at epoch {epoch}')
             break
 
     metrics_file.close()
+    preds_file.close()
     log.info(f'fold {fold} | best epoch={best_epoch} val={best_val:.4f} → {best_ckpt.name}')
     return best_val
 
