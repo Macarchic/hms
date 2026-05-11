@@ -1,2 +1,4 @@
 *.ipynb
 .venv/
+data/
+*.csv
