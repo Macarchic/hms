@@ -8,7 +8,8 @@ import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from tqdm import tqdm
 
 from model.logger import get_logger
 from model.dataset import VOTE_COLS, CLASS_NAMES, build_df_unique, make_folds, EEGDataset
@@ -47,12 +48,14 @@ def kldiv_loss(log_probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return F.kl_div(log_probs, targets, reduction='batchmean')
 
 
-def run_epoch(model, loader, optimizer, device, train: bool) -> float:
+def run_epoch(model, loader, optimizer, device, train: bool,
+              desc: str = '') -> float:
     model.train(train)
     total_loss, n = 0.0, 0
     ctx = torch.enable_grad() if train else torch.no_grad()
+    bar = tqdm(loader, desc=desc, leave=False, dynamic_ncols=True)
     with ctx:
-        for imgs, labels in loader:
+        for imgs, labels in bar:
             imgs, labels = imgs.to(device), labels.to(device)
             log_probs = model(imgs)
             loss = kldiv_loss(log_probs, labels)
@@ -62,28 +65,33 @@ def run_epoch(model, loader, optimizer, device, train: bool) -> float:
                 optimizer.step()
             total_loss += loss.item() * len(imgs)
             n += len(imgs)
+            bar.set_postfix(loss=f'{total_loss / n:.4f}')
     return total_loss / n
 
 
+def make_weighted_sampler(train_df: pd.DataFrame) -> WeightedRandomSampler:
+    counts = train_df['expert_consensus'].value_counts()
+    weights = train_df['expert_consensus'].map(lambda c: 1.0 / counts[c]).to_numpy(copy=True)
+    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+
+
 def predict_val(model, val_df: pd.DataFrame, eeg_dir: Path,
-                batch_size: int, device) -> pd.DataFrame:
+                batch_size: int, device, fold: int, epoch: int) -> pd.DataFrame:
     ds = EEGDataset(val_df, eeg_dir, augment=False)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
     model.eval()
     all_probs = []
     with torch.no_grad():
         for imgs, _ in loader:
-            log_probs = model(imgs.to(device))
-            all_probs.append(log_probs.exp().cpu().numpy())
+            all_probs.append(model(imgs.to(device)).exp().cpu().numpy())
     probs = np.vstack(all_probs)
 
-    true_cols = [f'true_{c}' for c in CLASS_NAMES]
-    pred_cols = [f'pred_{c}' for c in CLASS_NAMES]
-
     result = val_df[['eeg_id'] + VOTE_COLS].copy().reset_index(drop=True)
-    result.columns = ['eeg_id'] + true_cols
-    for i, col in enumerate(pred_cols):
-        result[col] = probs[:, i]
+    result.columns = ['eeg_id'] + [f'true_{c}' for c in CLASS_NAMES]
+    for i, c in enumerate(CLASS_NAMES):
+        result[f'pred_{c}'] = probs[:, i]
+    result.insert(0, 'epoch', epoch)
+    result.insert(0, 'fold', fold)
     return result
 
 
@@ -95,13 +103,17 @@ def train_fold(args, df: pd.DataFrame, fold: int, device,
 
     train_ds = EEGDataset(train_df, eeg_dir, augment=True)
     val_ds = EEGDataset(val_df, eeg_dir, augment=False)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+    sampler = make_weighted_sampler(train_df)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
                               num_workers=args.num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=True)
 
     model = build_model(args.backbone, args.dropout).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW([
+        {'params': model.backbone.parameters(), 'lr': args.lr / 10},
+        {'params': list(model.drop.parameters()) + list(model.fc.parameters()), 'lr': args.lr},
+    ], weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     best_val = float('inf')
@@ -119,14 +131,20 @@ def train_fold(args, df: pd.DataFrame, fold: int, device,
     log.info(f'fold {fold} | train={len(train_df)} val={len(val_df)}')
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(model, train_loader, optimizer, device, train=True)
-        val_loss = run_epoch(model, val_loader, optimizer, device, train=False)
+        train_loss = run_epoch(model, train_loader, optimizer, device, train=True,
+                               desc=f'f{fold} e{epoch:03d} train')
+        val_loss = run_epoch(model, val_loader, optimizer, device, train=False,
+                             desc=f'f{fold} e{epoch:03d} val  ')
         scheduler.step()
 
         writer.writerow({'fold': fold, 'epoch': epoch,
                          'train_loss': round(train_loss, 6),
                          'val_loss': round(val_loss, 6)})
         metrics_file.flush()
+
+        preds_df = predict_val(model, val_df, eeg_dir, args.batch_size, device, fold, epoch)
+        preds_path = log_dir / 'preds.csv'
+        preds_df.to_csv(preds_path, mode='a', header=not preds_path.exists(), index=False)
 
         improved = val_loss < best_val
         if improved:
@@ -152,17 +170,6 @@ def train_fold(args, df: pd.DataFrame, fold: int, device,
 
     metrics_file.close()
     log.info(f'fold {fold} | best epoch={best_epoch} val={best_val:.4f} → {best_ckpt.name}')
-
-    # predictions on val set from best checkpoint
-    model.load_state_dict(torch.load(best_ckpt, map_location=device))
-    preds_df = predict_val(model, val_df, eeg_dir, args.batch_size, device)
-    preds_df.insert(0, 'fold', fold)
-
-    preds_path = log_dir / 'preds.csv'
-    preds_df.to_csv(preds_path, mode='a',
-                    header=not preds_path.exists(), index=False)
-    log.info(f'fold {fold} | preds saved → {preds_path}')
-
     return best_val
 
 
