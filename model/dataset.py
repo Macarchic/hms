@@ -107,18 +107,24 @@ def _bandpass(signals: np.ndarray) -> np.ndarray:
     return sosfiltfilt(sos, signals, axis=-1).astype(np.float32)
 
 
-def _signals_to_image(signals: np.ndarray) -> np.ndarray:
+def _signals_to_image(signals: np.ndarray, center: int | None = None) -> np.ndarray:
     """
     Map each crop length to one RGB channel → (3, 512, 512).
     crop 2000  → channel 0  (fine detail,  10 sec)
     crop 5000  → channel 1  (mid scale,    25 sec)
     crop 10000 → channel 2  (full window,  50 sec)
-    Global normalisation applied after stacking.
+    `center` pins the temporal anchor for ch0/ch1 (default = middle sample).
     """
+    T = signals.shape[1]
+    if center is None:
+        center = T // 2
     channels = []
     for crop_len in CROP_LENGTHS:
-        start = (signals.shape[1] - crop_len) // 2
-        crop = signals[:, start: start + crop_len]  # (18, crop_len)
+        if crop_len >= T:
+            crop = signals
+        else:
+            start = np.clip(center - crop_len // 2, 0, T - crop_len)
+            crop = signals[:, start: start + crop_len]
         ch = cv2.resize(
             crop.astype(np.float32),
             (TARGET_SIZE, TARGET_SIZE),
@@ -129,6 +135,20 @@ def _signals_to_image(signals: np.ndarray) -> np.ndarray:
     img = (img - img.mean()) / (img.std() + 1e-6)
     return img
 
+
+def _xy_masking(img: np.ndarray, num_x: int = 2, num_y: int = 2,
+                ratio_x: float = 0.08, ratio_y: float = 0.08) -> np.ndarray:
+    img = img.copy()
+    _, H, W = img.shape
+    sw = max(1, int(W * ratio_x))
+    sh = max(1, int(H * ratio_y))
+    for _ in range(num_x):
+        x0 = np.random.randint(0, max(1, W - sw))
+        img[:, :, x0:x0 + sw] = 0.0
+    for _ in range(num_y):
+        y0 = np.random.randint(0, max(1, H - sh))
+        img[:, y0:y0 + sh, :] = 0.0
+    return img
 
 
 class EEGDataset(Dataset):
@@ -155,7 +175,20 @@ class EEGDataset(Dataset):
         bip = _bipolar_montage(eeg, NEEDED_COLS)
         bip = np.clip(bip, -1024.0, 1024.0) / 32.0
         filt = _bandpass(bip)
-        img = _signals_to_image(filt)  # (3, 512, 512)
+
+        if self.augment:
+            # random temporal center within the valid range for all crop lengths
+            max_crop = max(CROP_LENGTHS[:-1])  # 5000
+            center = np.random.randint(max_crop // 2, WIN_SAMPLES - max_crop // 2)
+            if np.random.rand() < 0.5:
+                filt = filt[:, ::-1].copy()  # time reversal
+        else:
+            center = WIN_SAMPLES // 2
+
+        img = _signals_to_image(filt, center=center)
+
+        if self.augment:
+            img = _xy_masking(img)
 
         label = row[VOTE_COLS].values.astype(np.float32)
         if self.augment:
