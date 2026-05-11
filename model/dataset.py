@@ -60,6 +60,14 @@ def build_df_unique(csv_path: str | Path) -> pd.DataFrame:
     return df_unique
 
 
+def build_df_train(csv_path: str | Path) -> pd.DataFrame:
+    """Raw train.csv rows with per-row normalised soft labels."""
+    df = pd.read_csv(csv_path)
+    totals = df[VOTE_COLS].sum(axis=1)
+    df[VOTE_COLS] = df[VOTE_COLS].div(totals, axis=0)
+    return df
+
+
 def make_folds(df: pd.DataFrame, n_splits: int = 5, seed: int = 42) -> pd.DataFrame:
     """
     Add a 'fold' column (0..n_splits-1) using StratifiedGroupKFold.
