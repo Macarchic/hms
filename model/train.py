@@ -8,11 +8,11 @@ import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model.logger import get_logger
-from model.dataset import VOTE_COLS, CLASS_NAMES, build_df_unique, make_folds, EEGDataset
+from model.dataset import CLASS_NAMES, build_df_unique, make_folds, EEGDataset
 
 ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / 'data'
@@ -79,11 +79,6 @@ def run_epoch(model, loader, optimizer, device, train: bool, desc: str = ''):
     return total_loss / n, torch.cat(all_probs), torch.cat(all_targets)
 
 
-def make_weighted_sampler(train_df: pd.DataFrame) -> WeightedRandomSampler:
-    counts = train_df['expert_consensus'].value_counts()
-    weights = train_df['expert_consensus'].map(lambda c: 1.0 / counts[c]).to_numpy(copy=True)
-    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-
 
 def summarise_preds(preds: torch.Tensor, targets: torch.Tensor,
                     fold: int, epoch: int) -> dict:
@@ -110,8 +105,7 @@ def train_fold(args, df: pd.DataFrame, fold: int, device,
 
     train_ds = EEGDataset(train_df, eeg_dir, augment=True)
     val_ds = EEGDataset(val_df, eeg_dir, augment=False)
-    sampler = make_weighted_sampler(train_df)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=True)
