@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model.logger import get_logger
-from model.dataset import CLASS_NAMES, build_df_unique, build_df_train, make_folds, EEGDataset
+from model.dataset import CLASS_NAMES, build_df_unique, build_df_train, make_folds, EEGDataset, mixup_batch
 
 ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / 'data'
@@ -62,6 +62,8 @@ def run_epoch(model, loader, optimizer, device, train: bool, desc: str = ''):
     with ctx:
         for imgs, labels in bar:
             imgs, labels = imgs.to(device), labels.to(device)
+            if train:
+                imgs, labels = mixup_batch(imgs, labels)
             log_probs = model(imgs)
             loss = kldiv_loss(log_probs, labels)
             if train:

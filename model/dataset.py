@@ -130,6 +130,16 @@ def _signals_to_image(signals: np.ndarray) -> np.ndarray:
     return img
 
 
+def mixup_batch(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    alpha: float = 0.4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lam = float(torch.distributions.Beta(alpha, alpha).sample())
+    idx = torch.randperm(x.size(0), device=x.device)
+    return lam * x + (1 - lam) * x[idx], lam * y + (1 - lam) * y[idx]
+
+
 def _xy_masking(
     img: torch.Tensor,
     num_masks_x: int = 2,
