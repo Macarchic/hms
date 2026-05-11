@@ -24,6 +24,8 @@ BIPOLAR_PAIRS = [
     ('Fp2', 'F4'), ('F4', 'C4'), ('C4', 'P4'), ('P4', 'O2'),
     ('Fz', 'Cz'), ('Cz', 'Pz'),
 ]
+NEEDED_COLS = list(dict.fromkeys(c for pair in BIPOLAR_PAIRS for c in pair))
+LABEL_SMOOTHING = 0.02
 
 
 def build_df_unique(csv_path: str | Path) -> pd.DataFrame:
@@ -85,11 +87,11 @@ def make_folds(df: pd.DataFrame, n_splits: int = 5, seed: int = 42) -> pd.DataFr
 
 
 def _load_eeg_window(eeg_id: int, offset_sec: float, eeg_dir: Path) -> np.ndarray:
-    raw = pq.read_table(eeg_dir / f'{eeg_id}.parquet').to_pandas()
+    raw = pq.read_table(eeg_dir / f'{eeg_id}.parquet', columns=NEEDED_COLS).to_pandas()
     start = int(offset_sec * FS)
     window = raw.iloc[start: start + WIN_SAMPLES]
     window = window.interpolate(axis=0, limit_direction='both').fillna(0)
-    return window.values.T.astype(np.float32)  # (20, 10000)
+    return window.values.T.astype(np.float32)  # (len(NEEDED_COLS), 10000)
 
 
 def _bipolar_montage(eeg: np.ndarray, columns: list) -> np.ndarray:
@@ -111,22 +113,42 @@ def _signals_to_image(signals: np.ndarray) -> np.ndarray:
     crop 2000  → channel 0  (fine detail,  10 sec)
     crop 5000  → channel 1  (mid scale,    25 sec)
     crop 10000 → channel 2  (full window,  50 sec)
+    Global normalisation applied after stacking.
     """
     channels = []
     for crop_len in CROP_LENGTHS:
         start = (signals.shape[1] - crop_len) // 2
         crop = signals[:, start: start + crop_len]  # (18, crop_len)
-        mu = np.nanmean(crop, axis=1, keepdims=True)
-        std = np.nanstd(crop, axis=1, keepdims=True) + 1e-6
-        crop = np.clip((crop - mu) / std, -3, 3)
-        crop = (crop + 3) / 6.0
         ch = cv2.resize(
             crop.astype(np.float32),
             (TARGET_SIZE, TARGET_SIZE),
             interpolation=cv2.INTER_LINEAR,
         )
         channels.append(ch)
-    return np.stack(channels)  # (3, 512, 512)
+    img = np.stack(channels)  # (3, 512, 512)
+    img = (img - img.mean()) / (img.std() + 1e-6)
+    return img
+
+
+def _xy_masking(
+    img: torch.Tensor,
+    num_masks_x: int = 2,
+    num_masks_y: int = 2,
+    mask_ratio_x: float = 0.1,
+    mask_ratio_y: float = 0.1,
+) -> torch.Tensor:
+    """Zero out random time (x) and channel/freq (y) strips."""
+    img = img.clone()
+    _, H, W = img.shape
+    sx = max(1, int(W * mask_ratio_x))
+    sy = max(1, int(H * mask_ratio_y))
+    for _ in range(num_masks_x):
+        x0 = np.random.randint(0, max(1, W - sx))
+        img[:, :, x0:x0 + sx] = 0.0
+    for _ in range(num_masks_y):
+        y0 = np.random.randint(0, max(1, H - sy))
+        img[:, y0:y0 + sy, :] = 0.0
+    return img
 
 
 class EEGDataset(Dataset):
@@ -143,8 +165,6 @@ class EEGDataset(Dataset):
         self.df = df.reset_index(drop=True)
         self.eeg_dir = Path(eeg_dir)
         self.augment = augment
-        sample = pq.read_table(self.eeg_dir / f'{int(df["eeg_id"].iloc[0])}.parquet').to_pandas()
-        self.eeg_cols = list(sample.columns)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -152,19 +172,25 @@ class EEGDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         row = self.df.iloc[idx]
         eeg = _load_eeg_window(int(row['eeg_id']), row['eeg_label_offset_seconds'], self.eeg_dir)
-        bip = _bipolar_montage(eeg, self.eeg_cols)
+        bip = _bipolar_montage(eeg, NEEDED_COLS)
+        bip = np.clip(bip, -1024.0, 1024.0) / 32.0
         filt = _bandpass(bip)
         img = _signals_to_image(filt)  # (3, 512, 512)
 
         if self.augment:
             img = self._augment(img)
 
-        img_t = torch.from_numpy(img)  # (3, 512, 512) float32
-        label = torch.tensor(row[VOTE_COLS].values.astype(np.float32))  # (6,)
-        return img_t, label
+        img_t = torch.from_numpy(img)
+        if self.augment:
+            img_t = _xy_masking(img_t)
+
+        label = row[VOTE_COLS].values.astype(np.float32)
+        label += LABEL_SMOOTHING
+        label /= label.sum()
+        return img_t, torch.from_numpy(label)
 
     @staticmethod
     def _augment(img: np.ndarray) -> np.ndarray:
         if np.random.rand() < 0.5:
-            img = img[:, :, ::-1].copy()  # time reversal (horizontal flip)
+            img = img[:, :, ::-1].copy()  # time reversal
         return img
