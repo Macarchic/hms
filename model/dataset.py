@@ -130,36 +130,6 @@ def _signals_to_image(signals: np.ndarray) -> np.ndarray:
     return img
 
 
-def mixup_batch(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    alpha: float = 0.4,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    lam = float(torch.distributions.Beta(alpha, alpha).sample())
-    idx = torch.randperm(x.size(0), device=x.device)
-    return lam * x + (1 - lam) * x[idx], lam * y + (1 - lam) * y[idx]
-
-
-def _xy_masking(
-    img: torch.Tensor,
-    num_masks_x: int = 2,
-    num_masks_y: int = 2,
-    mask_ratio_x: float = 0.1,
-    mask_ratio_y: float = 0.1,
-) -> torch.Tensor:
-    """Zero out random time (x) and channel/freq (y) strips."""
-    img = img.clone()
-    _, H, W = img.shape
-    sx = max(1, int(W * mask_ratio_x))
-    sy = max(1, int(H * mask_ratio_y))
-    for _ in range(num_masks_x):
-        x0 = np.random.randint(0, max(1, W - sx))
-        img[:, :, x0:x0 + sx] = 0.0
-    for _ in range(num_masks_y):
-        y0 = np.random.randint(0, max(1, H - sy))
-        img[:, y0:y0 + sy, :] = 0.0
-    return img
-
 
 class EEGDataset(Dataset):
     """
@@ -187,21 +157,8 @@ class EEGDataset(Dataset):
         filt = _bandpass(bip)
         img = _signals_to_image(filt)  # (3, 512, 512)
 
-        if self.augment:
-            img = self._augment(img)
-
-        img_t = torch.from_numpy(img)
-        if self.augment:
-            img_t = _xy_masking(img_t)
-
         label = row[VOTE_COLS].values.astype(np.float32)
         if self.augment:
             label += LABEL_SMOOTHING
             label /= label.sum()
-        return img_t, torch.from_numpy(label)
-
-    @staticmethod
-    def _augment(img: np.ndarray) -> np.ndarray:
-        if np.random.rand() < 0.5:
-            img = img[:, :, ::-1].copy()  # time reversal
-        return img
+        return torch.from_numpy(img), torch.from_numpy(label)
