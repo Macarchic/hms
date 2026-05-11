@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -63,26 +65,38 @@ def build_df_unique(csv_path: str | Path) -> pd.DataFrame:
 
 
 def build_df_train(csv_path: str | Path) -> pd.DataFrame:
-    """Raw train.csv rows with per-row normalised soft labels."""
+    """Raw train.csv rows with per-row normalised soft labels and expert_consensus."""
     df = pd.read_csv(csv_path)
     totals = df[VOTE_COLS].sum(axis=1)
     df[VOTE_COLS] = df[VOTE_COLS].div(totals, axis=0)
+    df['expert_consensus'] = (
+        df[VOTE_COLS].values.argmax(axis=1)
+    )
+    df['expert_consensus'] = df['expert_consensus'].map(dict(enumerate(CLASS_NAMES)))
     return df
 
 
 def make_folds(df: pd.DataFrame, n_splits: int = 5, seed: int = 42) -> pd.DataFrame:
     """
-    Add a 'fold' column (0..n_splits-1) using StratifiedGroupKFold.
-    Groups = patient_id  →  no patient appears in both train and val.
-    Stratify = expert_consensus  →  balanced class distribution per fold.
+    Add a 'fold' column to df_raw. All rows of the same eeg_id get the same fold.
+    Stratify by eeg-level expert_consensus, group by patient_id (no patient leakage).
     """
     df = df.copy()
-    df['fold'] = -1
+    # One representative row per eeg_id for stratification
+    eeg_meta = (
+        df.sort_values('eeg_sub_id')
+        .groupby('eeg_id', sort=False)
+        .first()
+        .reset_index()[['eeg_id', 'patient_id', 'expert_consensus']]
+    )
+    eeg_meta['fold'] = -1
     sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     for fold, (_, val_idx) in enumerate(
-        sgkf.split(df, y=df['expert_consensus'], groups=df['patient_id'])
+        sgkf.split(eeg_meta, y=eeg_meta['expert_consensus'], groups=eeg_meta['patient_id'])
     ):
-        df.loc[val_idx, 'fold'] = fold
+        eeg_meta.loc[val_idx, 'fold'] = fold
+    fold_map = eeg_meta.set_index('eeg_id')['fold']
+    df['fold'] = df['eeg_id'].map(fold_map)
     return df
 
 
@@ -153,44 +167,47 @@ def _xy_masking(img: np.ndarray, num_x: int = 2, num_y: int = 2,
 
 class EEGDataset(Dataset):
     """
-    Returns (image, label):
-      image : float32 tensor (3, 512, 512)
-                ch0 = crop 2000 samples  (fine)
-                ch1 = crop 5000 samples  (mid)
-                ch2 = crop 10000 samples (full)
-      label : float32 tensor (6,) — soft label probability distribution
+    One item = one unique eeg_id.
+    Training:   random sub_id per call  (offset variety = natural augmentation)
+    Validation: first sub_id by eeg_sub_id (deterministic)
+
+    image : float32 tensor (3, 512, 512)
+    label : float32 tensor (6,) — per-row soft label from the chosen sub-window
     """
 
     def __init__(self, df: pd.DataFrame, eeg_dir: str | Path, augment: bool = False):
-        self.df = df.reset_index(drop=True)
         self.eeg_dir = Path(eeg_dir)
         self.augment = augment
+        grouped = df.sort_values('eeg_sub_id').groupby('eeg_id', sort=False)
+        self.groups = {eid: grp.to_dict('records') for eid, grp in grouped}
+        self.eeg_ids = list(self.groups.keys())
 
     def __len__(self) -> int:
-        return len(self.df)
+        return len(self.eeg_ids)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        row = self.df.iloc[idx]
-        eeg = _load_eeg_window(int(row['eeg_id']), row['eeg_label_offset_seconds'], self.eeg_dir)
+        eeg_id = self.eeg_ids[idx]
+        rows = self.groups[eeg_id]
+        row = random.choice(rows) if self.augment else rows[0]
+
+        eeg = _load_eeg_window(eeg_id, row['eeg_label_offset_seconds'], self.eeg_dir)
         bip = _bipolar_montage(eeg, NEEDED_COLS)
         bip = np.clip(bip, -1024.0, 1024.0) / 32.0
         filt = _bandpass(bip)
 
         if self.augment:
-            # random temporal center within the valid range for all crop lengths
             max_crop = max(CROP_LENGTHS[:-1])  # 5000
             center = np.random.randint(max_crop // 2, WIN_SAMPLES - max_crop // 2)
             if np.random.rand() < 0.5:
-                filt = filt[:, ::-1].copy()  # time reversal
+                filt = filt[:, ::-1].copy()
         else:
             center = WIN_SAMPLES // 2
 
         img = _signals_to_image(filt, center=center)
-
         if self.augment:
             img = _xy_masking(img)
 
-        label = row[VOTE_COLS].values.astype(np.float32)
+        label = np.array([row[c] for c in VOTE_COLS], dtype=np.float32)
         if self.augment:
             label += LABEL_SMOOTHING
             label /= label.sum()

@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model.logger import get_logger
-from model.dataset import CLASS_NAMES, build_df_unique, build_df_train, make_folds, EEGDataset
+from model.dataset import CLASS_NAMES, build_df_train, make_folds, EEGDataset
 
 ROOT_DIR = Path(__file__).parent.parent
 DATA_DIR = ROOT_DIR / 'data'
@@ -97,11 +97,10 @@ def summarise_preds(preds: torch.Tensor, targets: torch.Tensor,
     return row
 
 
-def train_fold(args, df_unique: pd.DataFrame, df_raw: pd.DataFrame, fold: int, device,
+def train_fold(args, df: pd.DataFrame, fold: int, device,
                ckpt_dir: Path, log_dir: Path, log) -> float:
-    train_eeg_ids = set(df_unique[df_unique.fold != fold]['eeg_id'])
-    train_df = df_raw[df_raw['eeg_id'].isin(train_eeg_ids)].reset_index(drop=True)
-    val_df = df_unique[df_unique.fold == fold].reset_index(drop=True)
+    train_df = df[df.fold != fold]
+    val_df = df[df.fold == fold]
     eeg_dir = DATA_DIR / 'train_eegs'
 
     train_ds = EEGDataset(train_df, eeg_dir, augment=True)
@@ -139,7 +138,7 @@ def train_fold(args, df_unique: pd.DataFrame, df_raw: pd.DataFrame, fold: int, d
     if not preds_path.exists() or preds_path.stat().st_size == 0:
         preds_writer.writeheader()
 
-    log.info(f'fold {fold} | train={len(train_df)} val={len(val_df)}')
+    log.info(f'fold {fold} | train={len(train_ds)} eeg_ids  val={len(val_ds)} eeg_ids')
 
     for epoch in range(1, args.epochs + 1):
         train_loss, _, _ = run_epoch(model, train_loader, optimizer, device, train=True,
@@ -221,14 +220,13 @@ def main():
     )
     log.info(f'device={device}')
 
-    df_unique = build_df_unique(DATA_DIR / 'train.csv')
-    df_unique = make_folds(df_unique, n_splits=args.n_folds, seed=args.seed)
-    df_raw = build_df_train(DATA_DIR / 'train.csv')
+    df = build_df_train(DATA_DIR / 'train.csv')
+    df = make_folds(df, n_splits=args.n_folds, seed=args.seed)
 
     folds = [args.fold] if args.fold is not None else list(range(args.n_folds))
     scores = []
     for fold in folds:
-        score = train_fold(args, df_unique, df_raw, fold, device, ckpt_dir, log_dir, log)
+        score = train_fold(args, df, fold, device, ckpt_dir, log_dir, log)
         scores.append(score)
 
     log.info(f'CV: {[round(s, 4) for s in scores]}  mean={np.mean(scores):.4f}')
