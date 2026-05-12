@@ -162,6 +162,12 @@ def train_fold(args, df, fold: int, device, ckpt_dir: Path, log_dir: Path, log) 
 
     # Stage 1: all data, loss weighted by n_votes/20
     _run_stage(1, args.s1_epochs, args.s1_lr, min_votes=0, use_weights=True)
+
+    # Restore best Stage-1 weights — in-memory model may be at a worse last epoch
+    if best_ckpt and best_ckpt.exists():
+        model.load_state_dict(torch.load(best_ckpt, map_location=device)['state_dict'])
+        log.info(f'fold {fold} | restored best s1 weights → {best_ckpt.name}')
+
     # Stage 2: high-quality annotations only, uniform loss, lower LR
     _run_stage(2, args.s2_epochs, args.s2_lr, min_votes=args.s2_min_votes, use_weights=False)
 
