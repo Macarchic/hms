@@ -1,5 +1,6 @@
 import random
 
+import cv2
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -11,6 +12,8 @@ from pathlib import Path
 
 FS = 200
 WIN_SAMPLES = 10_000
+TARGET_SIZE = 512
+CROP_LENGTHS = [2000, 5000, 10_000]   # 10 s / 25 s / 50 s → RGB channels
 VOTE_COLS = ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']
 CLASS_NAMES = ['seizure', 'lpd', 'gpd', 'lrda', 'grda', 'other']
 LABEL_SMOOTHING = 0.005
@@ -32,6 +35,25 @@ LR_FLIP = [4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]
 def _bandpass(sig: np.ndarray, lo: float = 0.5, hi: float = 20.0) -> np.ndarray:
     sos = butter(5, [lo, hi], btype='bandpass', fs=FS, output='sos')
     return sosfilt(sos, sig, axis=-1).astype(np.float32)
+
+
+def _signals_to_image(sig: np.ndarray, center: int | None = None) -> np.ndarray:
+    """3 temporal crops → (3, TARGET_SIZE, TARGET_SIZE), z-score normalised."""
+    T = sig.shape[1]
+    if center is None:
+        center = T // 2
+    channels = []
+    for crop_len in CROP_LENGTHS:
+        if crop_len >= T:
+            crop = sig
+        else:
+            start = int(np.clip(center - crop_len // 2, 0, T - crop_len))
+            crop = sig[:, start: start + crop_len]
+        ch = cv2.resize(crop.astype(np.float32), (TARGET_SIZE, TARGET_SIZE),
+                        interpolation=cv2.INTER_LINEAR)
+        channels.append(ch)
+    img = np.stack(channels)  # (3, TARGET_SIZE, TARGET_SIZE)
+    return (img - img.mean()) / (img.std() + 1e-6)
 
 
 def build_df(csv_path: str | Path) -> pd.DataFrame:
@@ -116,11 +138,19 @@ class EEGDataset(Dataset):
         sig = self._load(eeg_id, int(row['eeg_label_offset_seconds']))
 
         if self.augment and random.random() < 0.5:
-            sig = sig[LR_FLIP]  # left-right hemisphere flip
+            sig = sig[LR_FLIP]
+
+        if self.augment:
+            half = CROP_LENGTHS[1] // 2  # 2500 — keeps all crops in-bounds
+            center = random.randint(half, WIN_SAMPLES - half)
+        else:
+            center = None
+
+        img = _signals_to_image(sig, center=center)
 
         label = torch.from_numpy(self.agg_labels[eeg_id])
         weight = torch.tensor(min(row['n_votes'] / 20.0, 1.0), dtype=torch.float32)
-        return torch.from_numpy(sig), label, weight
+        return torch.from_numpy(img), label, weight
 
     def _load(self, eeg_id: int, offset_sec: int) -> np.ndarray:
         raw = pq.read_table(self.eeg_dir / f'{eeg_id}.parquet', columns=EEG_COLS).to_pandas()
