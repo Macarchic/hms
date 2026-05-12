@@ -140,7 +140,11 @@ def train_fold(args, df, fold: int, device, ckpt_dir: Path, log_dir: Path, log) 
                     best_ckpt.unlink()
                 best_val = val_loss
                 best_ckpt = ckpt_dir / f'fold{fold}_s{stage}_e{epoch:03d}_val{val_loss:.4f}.ckpt'
-                torch.save(model.state_dict(), best_ckpt)
+                torch.save({
+                    'backbone': args.backbone,
+                    'dropout': args.dropout,
+                    'state_dict': model.state_dict(),
+                }, best_ckpt)
                 patience_count = 0
             else:
                 patience_count += 1
