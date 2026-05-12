@@ -12,8 +12,9 @@ from pathlib import Path
 
 FS = 200
 WIN_SAMPLES = 10_000
-TARGET_SIZE = 512
-CROP_LENGTHS = [2000, 5000, 10_000]   # 10 s / 25 s / 50 s → RGB channels
+MICRO = 10                          # micro-steps per macro column (5 ms each)
+N_MACRO = WIN_SAMPLES // MICRO      # 1000 macro columns
+CROP_LENGTHS = [2000, 5000, 10_000]  # 10 s / 25 s / 50 s → RGB channels
 VOTE_COLS = ['seizure_vote', 'lpd_vote', 'gpd_vote', 'lrda_vote', 'grda_vote', 'other_vote']
 CLASS_NAMES = ['seizure', 'lpd', 'gpd', 'lrda', 'grda', 'other']
 LABEL_SMOOTHING = 0.005
@@ -38,7 +39,13 @@ def _bandpass(sig: np.ndarray, lo: float = 0.5, hi: float = 20.0) -> np.ndarray:
 
 
 def _signals_to_image(sig: np.ndarray, center: int | None = None) -> np.ndarray:
-    """3 temporal crops → (3, TARGET_SIZE, TARGET_SIZE), z-score normalised."""
+    """
+    3 temporal crops → (3, 160, 1000), z-score normalised.
+    Each crop uses the same micro-step reshape (N_CH × MICRO → height),
+    then is linearly stretched to N_MACRO columns.
+    Channel 0 = 10 s (fine), 1 = 25 s (mid), 2 = 50 s (full).
+    """
+    IMG_H = N_CH * MICRO  # 160
     T = sig.shape[1]
     if center is None:
         center = T // 2
@@ -47,12 +54,18 @@ def _signals_to_image(sig: np.ndarray, center: int | None = None) -> np.ndarray:
         if crop_len >= T:
             crop = sig
         else:
-            start = int(np.clip(center - crop_len // 2, 0, T - crop_len))
-            crop = sig[:, start: start + crop_len]
-        ch = cv2.resize(crop.astype(np.float32), (TARGET_SIZE, TARGET_SIZE),
-                        interpolation=cv2.INTER_LINEAR)
-        channels.append(ch)
-    img = np.stack(channels)  # (3, TARGET_SIZE, TARGET_SIZE)
+            s = int(np.clip(center - crop_len // 2, 0, T - crop_len))
+            crop = sig[:, s: s + crop_len]
+        n = (crop.shape[1] // MICRO) * MICRO
+        frame = (crop[:, :n]
+                 .reshape(N_CH, n // MICRO, MICRO)
+                 .transpose(0, 2, 1)
+                 .reshape(IMG_H, n // MICRO)
+                 .astype(np.float32))
+        if frame.shape[1] != N_MACRO:
+            frame = cv2.resize(frame, (N_MACRO, IMG_H), interpolation=cv2.INTER_LINEAR)
+        channels.append(frame)
+    img = np.stack(channels)  # (3, 160, 1000)
     return (img - img.mean()) / (img.std() + 1e-6)
 
 
